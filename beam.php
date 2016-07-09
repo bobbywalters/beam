@@ -5,7 +5,7 @@
  * Description: An efficient streaming HTTP API transport.
  * Author: Bobby Walters
  * Author URI: https://github.com/bobbywalters
- * Version: 1.0.0
+ * Version: 2.0.0
  * Text Domain: beam
  * Domain Path: /languages
  * License: GPLv2
@@ -50,10 +50,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  * stream filter.
  * * The OpenSSL extension is needed for SSL/TLS (HTTPS) support.
  * * PHP streams must be able to create socket connections.
- * * The name of this class had to be prefixed with "WP_HTTP_" in order
- * for the WordPress HTTP API to register it as a valid transport.
  */
-class WP_HTTP_Beam {
+class Beam {
 	/**
 	 * Read a single line from the supplied PHP stream.
 	 *
@@ -79,7 +77,7 @@ class WP_HTTP_Beam {
 	 * @param string   $url    The requeust URL used to verify cookies.
 	 * @return array An associative array matching `WP_Http::processHeaders`.
 	 * @see WP_Http::processHeaders
-	 * @uses WP_HTTP_Beam::get_line
+	 * @uses Beam::get_line
 	 */
 	protected static function get_meta_data( $stream, $url ) {
 		// Read status line.
@@ -142,17 +140,103 @@ class WP_HTTP_Beam {
 	}
 
 	/**
-	 * Registers Beam with the WordPress HTTP API when hooked by the
-	 * `http_api_transports` filter.
+	 * Preempt the WordPress core HTTP request handling to use Beam.
 	 *
-	 * @param array  $transports Array of HTTP transports to check.
-	 * Default array contains 'curl', and 'streams', in that order.
-	 * @param array  $args       HTTP request arguments.
-	 * @param string $url        The URL to request.
-	 * @return array An array with a single element 'Beam'.
+	 * @param false|array|WP_Error $preempt Whether to preempt an HTTP
+	 * request's return value. Default false.
+	 * @param array                $r       HTTP request arguments.
+	 * @param string               $url     The request URL.
+	 * @return `false` if the request will not be processed by Beam
+	 * otherwise an `array` with server response data or a `WP_Error`
+	 * indicating the request was handled but an issue occurred.
+	 * @uses Beam::request
+	 * @since 2.0.0
 	 */
-	static function register( $transports, $args, $url ) {
-		return array( 'Beam' );
+	static function pre_http_request( $preempt, $r, $url ) {
+		if ( $r['reject_unsafe_urls'] && ! wp_http_validate_url( $url ) ) {
+			return new WP_Error( 'http_request_failed', __( 'Rejected unsafe URL through HTTP.' ) );
+		}
+
+		$http = new WP_Http;
+		if ( $http->block_request( $url ) ) {
+			return new WP_Error( 'http_request_failed', __( 'User has blocked requests through HTTP.' ) );
+		}
+		unset( $http );
+
+		if ( isset( $r['headers'] ) ) {
+			if ( is_string( $r['headers'] ) ) {
+				$stream = fopen( 'php://memory', 'rb+' );
+				fwrite( $stream, "HTTP/1.1 200 OK\r\n" );
+				fwrite( $stream, $r['headers'] );
+				fwrite( $stream, "\r\n\r\n" );
+				rewind( $stream );
+
+				$r['headers'] = self::get_meta_data( $stream, $url )['headers'];
+
+				fclose( $stream );
+				unset( $stream );
+			}
+
+			// WP_Http::buildCookieHeader allowed strings and WP_Http_Cookie.
+			if ( false === empty( $r['cookies'] ) ) {
+				$h = '';
+				foreach ( $r['cookies'] as $k => $c ) {
+					if ( $c instanceof WP_Http_Cookie ) {
+						$h .= '; ' . $c->getHeaderValue();
+					} else {
+						$h .= '; ' . $k . '=' . $c;
+					}
+				}
+
+				if ( '' !== $h ) {
+					if ( isset( $r['headers']['cookie']) ) {
+						$r['headers']['cookie'] .= $h;
+					} elseif ( isset( $r['headers']['Cookie'] ) ) {
+						$r['headers']['cookie'] = $r['headers']['Cookie'] . $h;
+						unset( $r['headers']['Cookie'] );
+					} else {
+						$r['headers']['cookie'] = substr( $h, 2 );
+					}
+				}
+
+				unset( $c, $h, $k );
+			}
+
+			if ( isset( $r['headers']['user-agent'] ) ) {
+				$r['user-agent'] = $r['headers']['user-agent'];
+			} elseif ( isset( $r['headers']['User-Agent'] ) ) {
+				$r['user-agent'] = $r['headers']['User-Agent'];
+			}
+			unset( $r['headers']['user-agent'], $r['headers']['User-Agent'] );
+
+			unset( $r['headers']['connection'], $r['headers']['Connection'] );
+		} else {
+			$r['headers'] = array();
+		}
+
+		$r['method'] = strtoupper( $r['method'] );
+
+		if ( 'POST' === $r['method']
+			|| 'PUT' === $r['method']
+			|| ( isset( $r['body'] ) && '' !== $r['body'] ) ) {
+
+			if ( is_array( $r['body'] ) || is_object( $r['body'] ) ) {
+				$r['body'] = http_build_query( $r['body'], null, '&' );
+				if ( false === isset( $r['headers']['content-type'] ) && false === isset( $r['headers']['Content-Type'] ) ) {
+					$r['headers']['content-type'] = 'application/x-www-form-urlencoded; charset=' . get_option( 'blog_charset' );
+				}
+			}
+
+			if ( '' === $r['body'] ) {
+				$r['body'] = null;
+			}
+
+			if ( false === isset( $r['headers']['content-length'] ) && false === isset( $r['headers']['Content-Length'] ) ) {
+				$r['headers']['content-length'] = strlen( $r['body'] );
+			}
+		}
+
+		return Beam::request( $url, $r );
 	}
 
 	/**
@@ -171,7 +255,7 @@ class WP_HTTP_Beam {
 	 * Or a WP_Error instance upon error.
 	 * @see WP_Http::request
 	 */
-	function request( $url, $r ) {
+	static function request( $url, $r ) {
 		$parsed_url = parse_url( $url );
 
 		switch ( strtolower( $parsed_url['scheme'] ) ) {
@@ -198,13 +282,15 @@ class WP_HTTP_Beam {
 		}
 		unset( $r['headers']['Host'], $r['headers']['host'] );
 
-		/*
-		 * Certain versions of PHP have issues with 'localhost' and IPv6, It
-		 * attempts to connect to ::1, which fails when the server is not
-		 * set up for it. For compatibility, always connect to the IPv4 address.
-		 */
-		if ( 'localhost' === strtolower( $host ) ) {
-			$host = '127.0.0.1';
+		switch ( strtolower( $host ) ) {
+			case 'localhost':
+				// Avoid issues with IPv6 vs IPv4, DNS, and PHP.
+				$host = '127.0.0.1';
+			case strtolower( parse_url( home_url(), PHP_URL_HOST ) ):
+				$local = true;
+				break;
+			default:
+				$local = false;
 		}
 
 		if ( isset( $parsed_url['port'] ) ) {
@@ -225,7 +311,7 @@ class WP_HTTP_Beam {
 		 * The filters are documented in `wp-includes/class-wp-http-sreams.php`.
 		 */
 		$ssl_verify = apply_filters(
-			isset( $r['local'] ) && $r['local'] ? 'https_local_ssl_verify' : 'https_ssl_verify',
+			$local ? 'https_local_ssl_verify' : 'https_ssl_verify',
 			isset( $r['sslverify'] ) && $r['sslverify']
 		);
 
@@ -377,7 +463,7 @@ class WP_HTTP_Beam {
 			$send_through_proxy = false;
 		}
 
-		fwrite( $stream, strtoupper( $r['method'] ) );
+		fwrite( $stream, $r['method'] );
 		fwrite( $stream, ' ' );
 
 		if ( $send_through_proxy ) { // Some proxies require full URL in this field.
@@ -428,6 +514,10 @@ class WP_HTTP_Beam {
 			fwrite( $stream, "\r\n" );
 		}
 
+		// Always close the connection.
+		fwrite( $stream, "connection: close\r\n" );
+
+		// Marks end of headers.
 		fwrite( $stream, "\r\n" );
 
 		if ( isset( $r['body'] ) && null !== $r['body'] ) {
@@ -484,7 +574,7 @@ class WP_HTTP_Beam {
 						}
 					}
 
-					return $this->request( $url, $r );
+					return self::request( $url, $r );
 			}
 		}
 
@@ -504,6 +594,10 @@ class WP_HTTP_Beam {
 		$limit = isset( $r['limit_response_size'] ) ? $r['limit_response_size'] : null;
 
 		if ( $r['stream'] ) {
+			if ( false === isset( $r['filename'] ) ) {
+				$r['filename'] = tempnam( get_temp_dir(), 'beam' );
+			}
+
 			if ( $file = fopen( $r['filename'], 'wb' ) ) {
 				if ( null !== $limit ) {
 					while ( 0 < $limit && ! feof( $stream ) ) {
@@ -566,19 +660,7 @@ class WP_HTTP_Beam {
 	static function request_version( $version ) {
 		return '1.1';
 	}
-
-	/**
-	 * Determines whether this class can be used for retrieving a URL.
-	 *
-	 * @param array  $args Request arguments.
-	 * @param string $url  URL to request.
-	 * @return bool False means this class can not be used, true
-	 * means it can. Default true.
-	 */
-	static function test( $args, $url ) {
-		return true;
-	}
 }
 
-add_filter( 'http_api_transports', 'WP_HTTP_Beam::register', 99, 3 );
-add_filter( 'http_request_version', 'WP_HTTP_Beam::request_version' );
+add_filter( 'http_request_version', 'Beam::request_version' );
+add_filter( 'pre_http_request', 'Beam::pre_http_request', 99, 3 );

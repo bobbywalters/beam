@@ -2,7 +2,7 @@
 Contributors: bobbywalters
 Tags: http, proxy, remote API, socket, stream, tunnel
 Requires at least: 3.7.0
-Tested up to: 4.5
+Tested up to: 4.6
 Stable tag: trunk
 License: GPLv2
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
@@ -60,5 +60,16 @@ Beam provides filter `'proxy_tunnel'` to change which requests require a tunnele
 
 == Changelog ==
 
+= 2.0.0 =
+
+2016-07-09
+
+This release was focused on getting Beam to work on WordPress 4.6.
+
+* FIX: WordPress 4.6 now uses the `Requests` library to handle HTTP requests and the swap prevented Beam from being used.
+* NEW: Beam is now triggered via the `pre_http_request` filter to handle requests.
+* NEW: `WP_HTTP_Beam` was renamed to `Beam` since Beam is no longer loaded as a WP HTTP API transport.
+
 = 1.0.0 =
+
 Initial release.

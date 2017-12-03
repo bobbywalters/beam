@@ -2,7 +2,7 @@
 Contributors: bobbywalters
 Tags: http, proxy, remote API, socket, stream, tunnel
 Requires at least: 3.7.0
-Tested up to: 4.8
+Tested up to: 4.9
 Stable tag: trunk
 License: GPLv2
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
